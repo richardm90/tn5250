@@ -550,8 +550,15 @@ static void telnet_stream_do_verb(Tn5250Stream* This, unsigned char verb,
     IACVERB_LOG("GotVerb(3)", verb, what);
     ret = send(This->sockfd, (char*)reply, 3, 0);
     if (WAS_ERROR_RET(ret)) {
+        /* Used to exit(5) here, killing the whole process on a dropped
+         * connection instead of reporting one. This is called while
+         * already inside telnet_stream_handle_receive()'s call chain
+         * (responding to negotiation as it arrives), which already checks
+         * This->failed before returning -- see stream.h's
+         * tn5250_stream_has_failed(). */
         printf("Error writing to socket: %s\n", strerror(LAST_ERROR));
-        exit(5);
+        _tn5250_set_error(TN5250_ERROR_ERRNO, LAST_ERROR);
+        This->failed = 1;
     }
 }
 
@@ -622,8 +629,14 @@ static void telnet_stream_sb(Tn5250Stream* This, unsigned char* sb_buf,
         ret = send(This->sockfd, (char*)tn5250_buffer_data(&out_buf),
                    tn5250_buffer_length(&out_buf), 0);
         if (WAS_ERROR_RET(ret)) {
+            /* Used to exit(5) here. Must return rather than just fall
+             * through, unlike do_verb's site above -- the status-flag
+             * update right after this assumes the send succeeded. */
             printf("Error writing to socket: %s\n", strerror(LAST_ERROR));
-            exit(5);
+            _tn5250_set_error(TN5250_ERROR_ERRNO, LAST_ERROR);
+            This->failed = 1;
+            tn5250_buffer_free(&out_buf);
+            return;
         }
         TN5250_LOG(("SentSB:<IAC><SB><TERMTYPE><IS>%s<IAC><SE>\n", termtype));
 
@@ -655,8 +668,14 @@ static void telnet_stream_sb(Tn5250Stream* This, unsigned char* sb_buf,
         ret = send(This->sockfd, (char*)tn5250_buffer_data(&out_buf),
                    tn5250_buffer_length(&out_buf), 0);
         if (WAS_ERROR_RET(ret)) {
+            /* Used to exit(5) here. tn5250_buffer_free() below is this
+             * function's shared cleanup for both branches -- must still
+             * run rather than returning straight past it. */
             printf("Error writing to socket: %s\n", strerror(LAST_ERROR));
-            exit(5);
+            _tn5250_set_error(TN5250_ERROR_ERRNO, LAST_ERROR);
+            This->failed = 1;
+            tn5250_buffer_free(&out_buf);
+            return;
         }
         TN5250_LOG(("SentSB:<IAC><SB>"));
         TNSB_LOG(&out_buf.data[2], out_buf.len - 4);
@@ -820,8 +839,17 @@ static void telnet_stream_write(Tn5250Stream* This, unsigned char* data,
                 continue;
 
             default:
+                /* Used to exit(5) here. `continue` rather than falling
+                 * through to the FD_ISSET check below -- fdw's contents
+                 * are unspecified after a failed select(). The loop's own
+                 * condition (size && (r >= 0 || last_error == ERR_AGAIN))
+                 * already ends the loop correctly once we do: r is
+                 * negative and last_error is a real error here, neither
+                 * disjunct holds. */
                 perror("select");
-                exit(5);
+                _tn5250_set_error(TN5250_ERROR_ERRNO, last_error);
+                This->failed = 1;
+                continue;
             }
         }
         if (FD_ISSET(This->sockfd, &fdw)) {
@@ -829,8 +857,12 @@ static void telnet_stream_write(Tn5250Stream* This, unsigned char* data,
             if (WAS_ERROR_RET(r)) {
                 last_error = LAST_ERROR;
                 if (last_error != ERR_AGAIN) {
+                    /* Used to exit(5) here. Falling through to the loop's
+                     * own condition below ends it correctly, the same way
+                     * the select() failure above does. */
                     perror("Error writing to socket");
-                    exit(5);
+                    _tn5250_set_error(TN5250_ERROR_ERRNO, last_error);
+                    This->failed = 1;
                 }
             }
             if (r > 0) {
@@ -948,7 +980,14 @@ int telnet_stream_handle_receive(Tn5250Stream* This) {
         tn5250_record_append_byte(This->current_record, (unsigned char)c);
     }
 
-    return (c != -2);
+    /* This->failed catches a write failure recorded by telnet_stream_do_verb()
+     * or telnet_stream_sb() during this very call (responding to negotiation
+     * as it arrived, above), or by telnet_stream_write() on a previous call --
+     * either way, tn5250_session_main_loop() treats a false return here
+     * exactly like "disconnected" (c == -2) and returns, which is what lets
+     * Terminal::run() reach its emit closed(...) instead of the process
+     * having already exit()ed before ever getting the chance. */
+    return !This->failed && (c != -2);
 }
 
 /****i* lib5250/telnet_stream_escape

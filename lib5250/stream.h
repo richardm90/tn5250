@@ -88,6 +88,27 @@ tn5250_stream_getenv(Tn5250Stream* This, const char* name);
 #define tn5250_stream_record_count(This) ((This)->record_count)
 extern int tn5250_stream_socket_handle(Tn5250Stream* This);
 
+/****f* lib5250/tn5250_stream_has_failed
+ * NAME
+ *    tn5250_stream_has_failed
+ * SYNOPSIS
+ *    if (tn5250_stream_has_failed (This)) { ... }
+ * DESCRIPTION
+ *    True once a write to this stream has failed. Both telnetstr.c and
+ *    sslstream.c used to call exit() on a write failure, killing the whole
+ *    process instead of reporting a dropped connection; they now record
+ *    the failure here instead. telnet_stream_handle_receive() and
+ *    ssl_stream_handle_receive() already check this themselves and return
+ *    failure up through the existing tn5250_session_main_loop() ->
+ *    Terminal::run() -> closed() path the moment it is set, so most
+ *    callers never need to call this directly -- it exists for a caller
+ *    (see Terminal::waitEvent()) that wants to notice a write failure
+ *    immediately rather than waiting for the next receive event, which is
+ *    not guaranteed to arrive promptly (or, in principle, at all) on a
+ *    connection that is only broken in the outbound direction.
+ *****/
+extern int tn5250_stream_has_failed(Tn5250Stream* This);
+
 /****s* lib5250/Tn5250PeerCertInfo
  * NAME
  *    Tn5250PeerCertInfo

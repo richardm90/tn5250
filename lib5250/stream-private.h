@@ -51,6 +51,11 @@ struct _Tn5250Stream {
     int state;
     long msec_wait;
     unsigned char options;
+    int failed; /* set instead of calling exit() on a write failure that
+                 * used to kill the whole process -- see stream.h's
+                 * tn5250_stream_has_failed(). Shared by every stream type
+                 * (not just SSL), zero-initialised for free since
+                 * tn5250_new() is calloc-based. */
 
     unsigned char rcvbuf[TN5250_RBSIZE];
     int rcvbufpos;

@@ -910,9 +910,14 @@ static void ssl_stream_do_verb(Tn5250Stream* This, unsigned char verb,
     TN5250_LOG(("SSL_Write: %x %x %x\n", reply[0], reply[1], reply[2]));
     ret = SSL_write(This->ssl_handle, (char*)reply, 3);
     if (ret < 1) {
+        /* Used to exit(5) here. Called from inside
+         * ssl_stream_handle_receive()'s call chain, which already checks
+         * This->failed before returning -- see stream.h's
+         * tn5250_stream_has_failed(). */
         errnum = SSL_get_error(This->ssl_handle, ret);
         printf("Error writing to socket: %s\n", ERR_error_string(errnum, NULL));
-        exit(5);
+        _tn5250_set_error(TN5250_ERROR_SSL, ERR_peek_error());
+        This->failed = 1;
     }
 }
 
@@ -983,9 +988,15 @@ static void ssl_stream_sb(Tn5250Stream* This, unsigned char* sb_buf,
         ret = SSL_write(This->ssl_handle, (char*)tn5250_buffer_data(&out_buf),
                         tn5250_buffer_length(&out_buf));
         if (ret < 1) {
+            /* Used to exit(5) here. Must return rather than just fall
+             * through, unlike do_verb's site above -- the status-flag
+             * update right after this assumes the send succeeded. */
             errnum = SSL_get_error(This->ssl_handle, ret);
             printf("Error in SSL_write: %s\n", ERR_error_string(errnum, NULL));
-            exit(5);
+            _tn5250_set_error(TN5250_ERROR_SSL, ERR_peek_error());
+            This->failed = 1;
+            tn5250_buffer_free(&out_buf);
+            return;
         }
         TN5250_LOG(("SentSB:<IAC><SB><TERMTYPE><IS>%s<IAC><SE>\n", termtype));
 
@@ -1017,9 +1028,15 @@ static void ssl_stream_sb(Tn5250Stream* This, unsigned char* sb_buf,
         ret = SSL_write(This->ssl_handle, (char*)tn5250_buffer_data(&out_buf),
                         tn5250_buffer_length(&out_buf));
         if (ret < 1) {
+            /* Used to exit(5) here. tn5250_buffer_free() below is this
+             * function's shared cleanup for both branches -- must still
+             * run rather than returning straight past it. */
             errnum = SSL_get_error(This->ssl_handle, ret);
             printf("Error in SSL_write: %s\n", ERR_error_string(errnum, NULL));
-            exit(5);
+            _tn5250_set_error(TN5250_ERROR_SSL, ERR_peek_error());
+            This->failed = 1;
+            tn5250_buffer_free(&out_buf);
+            return;
         }
         TN5250_LOG(("SentSB:<IAC><SB>"));
         TNSB_LOG(&out_buf.data[2], out_buf.len - 4);
@@ -1172,7 +1189,21 @@ static void ssl_stream_write(Tn5250Stream* This, unsigned char* data,
         if (r < 1) {
             errnum = SSL_get_error(This->ssl_handle, r);
             if ((errnum != SSL_ERROR_WANT_READ) &&
-                (errnum != SSL_ERROR_WANT_WRITE)) {}
+                (errnum != SSL_ERROR_WANT_WRITE)) {
+                /* A real, non-retryable failure (SSL_ERROR_SYSCALL,
+                 * SSL_ERROR_SSL, SSL_ERROR_ZERO_RETURN, ...) -- this
+                 * condition used to be an empty no-op block here, meaning
+                 * a genuinely broken connection fell through to select()
+                 * and looped indefinitely rather than either exiting or
+                 * reporting a failure: a tighter, worse variant of the
+                 * exit(5) problem elsewhere in this file, since a spin
+                 * loop does not even leave a "died with an error" message
+                 * behind. There is no other exit(5) here to have copied
+                 * this bug's shape from; fixed the same way regardless. */
+                _tn5250_set_error(TN5250_ERROR_SSL, ERR_peek_error());
+                This->failed = 1;
+                return;
+            }
             FD_ZERO(&fdw);
             FD_SET(This->sockfd, &fdw);
             if (errnum == SSL_ERROR_WANT_READ) {
@@ -1318,7 +1349,10 @@ int ssl_stream_handle_receive(Tn5250Stream* This) {
         tn5250_record_append_byte(This->current_record, (unsigned char)c);
     }
 
-    return (c != -2);
+    /* This->failed catches a write failure recorded by ssl_stream_do_verb(),
+     * ssl_stream_sb() or ssl_stream_write() -- see telnet_stream_handle_receive()'s
+     * identical comment in telnetstr.c. */
+    return !This->failed && (c != -2);
 }
 
 /****i* lib5250/ssl_stream_escape

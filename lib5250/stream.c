@@ -103,6 +103,22 @@ Tn5250Stream* tn5250_stream_open(const char* to, Tn5250Config* config) {
     const char* postfix;
     int ret;
 
+#ifndef _WIN32
+    /* A write to a socket the peer has already reset raises SIGPIPE, whose
+     * default disposition -- with no handler installed, which is the case
+     * in every consumer of this library -- terminates the whole process
+     * immediately, before write()/SSL_write() even returns a value for
+     * the error-handling this file and sslstream.c do (see their
+     * This->failed writes) to have any chance to run. This is the same
+     * category of problem exit(5) was -- a dropped connection killing the
+     * process outright -- just via a signal instead of a direct call, and
+     * unlike exit(5) it is not something any individual call site can
+     * guard against on its own; it has to be suppressed process-wide,
+     * once, before any socket I/O happens. SIGPIPE does not exist on
+     * Windows. */
+    signal(SIGPIPE, SIG_IGN);
+#endif
+
     if (This != NULL) {
 
         streamInit(This, 0);
@@ -308,4 +324,8 @@ void tn5250_stream_unsetenv(Tn5250Stream* This, const char* name) {
 
 int tn5250_stream_socket_handle(Tn5250Stream* This) {
     return (int)This->sockfd;
+}
+
+int tn5250_stream_has_failed(Tn5250Stream* This) {
+    return This->failed;
 }
