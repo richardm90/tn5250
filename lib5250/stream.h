@@ -88,6 +88,60 @@ tn5250_stream_getenv(Tn5250Stream* This, const char* name);
 #define tn5250_stream_record_count(This) ((This)->record_count)
 extern int tn5250_stream_socket_handle(Tn5250Stream* This);
 
+/****s* lib5250/Tn5250PeerCertInfo
+ * NAME
+ *    Tn5250PeerCertInfo
+ * DESCRIPTION
+ *    A snapshot of the TLS leaf certificate a server presented, taken once
+ *    at connect time. Deliberately plain C types only (no OpenSSL type
+ *    anywhere in this struct or the function below) so that code built
+ *    without HAVE_LIBSSL visibility -- which is every consumer outside
+ *    lib5250 itself, since that define is private to this library's own
+ *    build -- can still declare and call tn5250_stream_get_peer_cert_info()
+ *    unconditionally. This is for trust-on-first-use pinning of the leaf
+ *    certificate's content, not chain verification: nothing here says
+ *    whether the certificate is valid against any CA, only what it says
+ *    about itself.
+ * SOURCE
+ */
+/* A named tag (not an anonymous struct), matching how _Tn5250Stream/
+ * Tn5250Stream is done just above -- so a consumer header can forward-
+ * declare `struct _Tn5250PeerCertInfo;` without including this header at
+ * all, the same way term.h forward-declares every other lib5250 type
+ * rather than including lib5250.h itself. */
+struct _Tn5250PeerCertInfo {
+    unsigned char sha256[32]; /* SHA-256 of the leaf cert's DER encoding --
+                                * this is what gets pinned. */
+    char subject[256];        /* X509_NAME_oneline() of the subject, truncated */
+    char issuer[256];         /* ...of the issuer */
+    char serialHex[64];
+    char pubKeyType[32];      /* e.g. "RSA 2048-bit", "EC 256-bit" */
+    char notBefore[64];
+    char notAfter[64];
+};
+typedef struct _Tn5250PeerCertInfo Tn5250PeerCertInfo;
+/******/
+
+/****f* lib5250/tn5250_stream_get_peer_cert_info
+ * NAME
+ *    tn5250_stream_get_peer_cert_info
+ * SYNOPSIS
+ *    rc = tn5250_stream_get_peer_cert_info (This, &info);
+ * DESCRIPTION
+ *    Fetch a snapshot of the TLS leaf certificate presented by the server
+ *    This is connected to. Returns:
+ *      0 -- an SSL stream with a certificate available; info is filled in.
+ *      1 -- not an SSL stream (e.g. plain telnet). info is untouched; the
+ *           caller should skip certificate-pinning entirely, exactly as
+ *           it would have before this function existed.
+ *      2 -- an SSL stream, but no certificate could be read. info is
+ *           untouched. Callers MUST treat this as a hard failure, not as
+ *           equivalent to case 1 -- silently skipping pinning here would
+ *           make a security-relevant check fail open.
+ *****/
+extern int tn5250_stream_get_peer_cert_info(Tn5250Stream* This,
+                                            Tn5250PeerCertInfo* info);
+
 #ifdef __cplusplus
 }
 

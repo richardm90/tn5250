@@ -60,6 +60,9 @@ struct _Tn5250Stream {
     SSL* ssl_handle;
     SSL_CTX* ssl_context;
     void* userdata;
+    X509* peer_cert; /* set once in ssl_stream_connect(), freed in
+                       * ssl_stream_destroy() -- see stream.h's
+                       * tn5250_stream_get_peer_cert_info(). */
 #endif
 
 #ifndef NDEBUG

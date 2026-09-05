@@ -27,6 +27,8 @@
 
 #include <openssl/ssl.h>
 #include <openssl/err.h>
+#include <openssl/bio.h>
+#include <openssl/bn.h>
 #include <time.h>
 
 #if defined(__SVR4) && defined(__sun)
@@ -577,6 +579,17 @@ static int ssl_stream_connect(Tn5250Stream* This, const char* to) {
     }
     else {
         time_t tnow = time(NULL);
+        /* Stored immediately, before the expiry/verify checks below that can
+         * still `return -1` on their own -- both of those paths already run
+         * after this fetch, and would otherwise leak the reference (as this
+         * function already did, unconditionally, before this line existed).
+         * Freed once in ssl_stream_destroy(), the only teardown hook this
+         * codebase's call graph actually reaches (ssl_stream_disconnect() is
+         * never invoked from anywhere in lib5250 or the app). */
+        if (This->peer_cert != NULL) {
+            X509_free(This->peer_cert);
+        }
+        This->peer_cert = server_cert;
         int extra_time = 0;
         if (This->config != NULL &&
             tn5250_config_get(This->config, "ssl_check_exp") != NULL) {
@@ -650,7 +663,126 @@ static void ssl_stream_disconnect(Tn5250Stream* This) {
  * DESCRIPTION
  *    DOCUMENT ME!!!
  *****/
-static void ssl_stream_destroy(Tn5250Stream* This) { /* noop */
+static void ssl_stream_destroy(Tn5250Stream* This) {
+    if (This->peer_cert != NULL) {
+        X509_free(This->peer_cert);
+        This->peer_cert = NULL;
+    }
+}
+
+/* Prints an ASN1_TIME into a fixed buffer via a memory BIO -- the only way
+ * OpenSSL offers to format one, short of hand-parsing its ASN.1 encoding.
+ * Leaves out[0] == '\0' on any failure rather than propagating one; these
+ * fields are for human display only, never compared for a trust decision. */
+static void ssl_stream_format_time(const ASN1_TIME* time, char* out,
+                                   size_t outSize) {
+    BIO* bio;
+    int len;
+
+    out[0] = '\0';
+    bio = BIO_new(BIO_s_mem());
+    if (bio == NULL) {
+        return;
+    }
+    if (ASN1_TIME_print(bio, time)) {
+        len = BIO_read(bio, out, (int)outSize - 1);
+        out[len > 0 ? len : 0] = '\0';
+    }
+    BIO_free(bio);
+}
+
+/****f* lib5250/tn5250_stream_get_peer_cert_info
+ * NAME
+ *    tn5250_stream_get_peer_cert_info
+ * SYNOPSIS
+ *    rc = tn5250_stream_get_peer_cert_info (This, &info);
+ * DESCRIPTION
+ *    See stream.h for the return contract (0/1/2). The certificate read
+ *    here is a snapshot taken once in ssl_stream_connect() -- there is no
+ *    renegotiation handling anywhere in this file, so it cannot change
+ *    within the lifetime of one connection.
+ *****/
+int tn5250_stream_get_peer_cert_info(Tn5250Stream* This,
+                                     Tn5250PeerCertInfo* info) {
+    X509* cert;
+    unsigned char* der;
+    int derLen;
+    unsigned int digestLen;
+    ASN1_INTEGER* serial;
+    BIGNUM* serialBn;
+    char* serialHex;
+    EVP_PKEY* pubkey;
+    const char* keyKind;
+
+    if (This->peer_cert == NULL) {
+        return 1; /* not an SSL stream, or connect() never reached the point
+                    * of fetching one -- see stream.h's contract. */
+    }
+    cert = This->peer_cert;
+
+    /* The digest is the only field that matters for the trust decision
+     * itself; everything below it is display-only context. Compute it
+     * first and fail closed (return 2) if it cannot be produced, rather
+     * than handing back a struct whose security-relevant field is silently
+     * empty. */
+    der = NULL;
+    derLen = i2d_X509(cert, &der);
+    if (derLen <= 0 || der == NULL) {
+        return 2;
+    }
+    digestLen = 0;
+    if (EVP_Digest(der, (size_t)derLen, info->sha256, &digestLen,
+                   EVP_sha256(), NULL) != 1 ||
+        digestLen != sizeof(info->sha256)) {
+        OPENSSL_free(der);
+        return 2;
+    }
+    OPENSSL_free(der);
+
+    /* X509_get_subject_name()/X509_get_issuer_name() return pointers owned
+     * by `cert` -- never freed here. The three-argument X509_NAME_oneline()
+     * writes into the caller's buffer and truncates, unlike the
+     * two-argument form used for the existing log line a few hundred lines
+     * up in this file, which OPENSSL_mallocs a buffer that line never
+     * frees. */
+    X509_NAME_oneline(X509_get_subject_name(cert), info->subject,
+                      (int)sizeof(info->subject));
+    X509_NAME_oneline(X509_get_issuer_name(cert), info->issuer,
+                      (int)sizeof(info->issuer));
+
+    info->serialHex[0] = '\0';
+    serial = X509_get_serialNumber(cert); /* owned by cert; do not free */
+    serialBn = ASN1_INTEGER_to_BN(serial, NULL);
+    if (serialBn != NULL) {
+        serialHex = BN_bn2hex(serialBn);
+        if (serialHex != NULL) {
+            snprintf(info->serialHex, sizeof(info->serialHex), "%s", serialHex);
+            OPENSSL_free(serialHex);
+        }
+        BN_free(serialBn);
+    }
+
+    info->pubKeyType[0] = '\0';
+    pubkey = X509_get_pubkey(cert); /* a NEW up-refed reference, unlike the
+                                      * two calls above -- must EVP_PKEY_free. */
+    if (pubkey != NULL) {
+        switch (EVP_PKEY_base_id(pubkey)) {
+        case EVP_PKEY_RSA: keyKind = "RSA"; break;
+        case EVP_PKEY_EC:  keyKind = "EC"; break;
+        case EVP_PKEY_DSA: keyKind = "DSA"; break;
+        default:           keyKind = "key"; break;
+        }
+        snprintf(info->pubKeyType, sizeof(info->pubKeyType), "%s %d-bit",
+                keyKind, EVP_PKEY_bits(pubkey));
+        EVP_PKEY_free(pubkey);
+    }
+
+    ssl_stream_format_time(X509_get_notBefore(cert), info->notBefore,
+                           sizeof(info->notBefore));
+    ssl_stream_format_time(X509_get_notAfter(cert), info->notAfter,
+                           sizeof(info->notAfter));
+
+    return 0;
 }
 
 /****i* lib5250/ssl_stream_get_next
