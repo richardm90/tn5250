@@ -378,20 +378,23 @@ int tn5250_field_count_right(Tn5250Field* This, int y, int x) {
     return tn5250_field_end_pos(This) - (y * This->w + x);
 }
 
-/****f* lib5250/tn5250_field_valid_char
+/****f* lib5250/tn5250_field_valid_char_map
  * NAME
- *    tn5250_field_valid_char
+ *    tn5250_field_valid_char_map
  * SYNOPSIS
- *    ret = tn5250_field_valid_char (field, ch);
+ *    ret = tn5250_field_valid_char_map (field, map, ch, &src);
  * INPUTS
  *    Tn5250Field *        field      -
+ *    Tn5250CharMap *      map        - ch's local charset, for ALPHA_ONLY's
+ *                                       isalpha() check; NULL for ASCII-only
  *    int                  ch         -
  *    int         *        src        -
  * DESCRIPTION
  *    Determine if the supplied character is a valid data character
  *    for this field, and return system reference code for errors (SRC)
  *****/
-int tn5250_field_valid_char(Tn5250Field* field, int ch, int* src) {
+int tn5250_field_valid_char_map(Tn5250Field* field, Tn5250CharMap* map, int ch,
+                                int* src) {
     TN5250_LOG(("HandleKey: fieldtype = %d; char = '%c'.\n",
                 tn5250_field_type(field), ch));
 
@@ -402,8 +405,8 @@ int tn5250_field_valid_char(Tn5250Field* field, int ch, int* src) {
         return 1;
 
     case TN5250_FIELD_ALPHA_ONLY:
-        if (!(isalpha(ch) || ch == ',' || ch == '.' || ch == '-' ||
-              ch == ' ')) {
+        if (!(tn5250_char_map_is_alpha(map, (unsigned char)ch) || ch == ',' ||
+              ch == '.' || ch == '-' || ch == ' ')) {
             *src = TN5250_KBDSRC_ALPHAONLY;
             return 0;
         }
@@ -443,6 +446,19 @@ int tn5250_field_valid_char(Tn5250Field* field, int ch, int* src) {
         return 1;
     }
     return 0;
+}
+
+/* Kept for external API stability -- no caller inside this library needs
+   it any more (display.c passes its own This->map to
+   tn5250_field_valid_char_map() directly). NULL means ASCII-only
+   classification, matching this function's own prior behaviour for every
+   ch actually reachable from this library's own callers (0-255) -- not a
+   byte-for-byte guarantee for an out-of-range ch an external caller might
+   pass, since the prior inline body handed isalpha() the raw int
+   unclamped, where tn5250_field_valid_char_map() now classifies
+   (unsigned char)ch instead. */
+int tn5250_field_valid_char(Tn5250Field* field, int ch, int* src) {
+    return tn5250_field_valid_char_map(field, NULL, ch, src);
 }
 
 /****f* lib5250/tn5250_field_set_mdt

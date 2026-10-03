@@ -22,6 +22,25 @@
 #include "tn5250-private.h"
 #include "transmaps.h"
 
+/* ALPHA_ONLY validation and monocase upcasing need is-alpha/to-upper
+   classification of a *local-charset* byte, which plain isalpha()/toupper()
+   only get right for ASCII -- wrong for every accented Latin-1 letter and
+   everything in a non-Latin charset. Classification is per-charset (9
+   distinct ones across all 19 single-byte CCSIDs; several share a charset,
+   e.g. every ISO-8859-1 one), generated offline by tools/gen_charclass.py
+   rather than computed at runtime -- see that script's own comment for why
+   it uses Python's stdlib codecs rather than vendoring, unlike
+   tools/gen_charmaps.py on the rm-5250 side. Kept as a table keyed by
+   map->name, not new fields on the public, ABI-published struct
+   _Tn5250CharMap. */
+typedef struct _Tn5250CharClass {
+    const char* name;
+    const unsigned char* is_alpha;
+    const unsigned char* to_upper;
+} Tn5250CharClass;
+
+#include "charclass.h"
+
 #if defined(__SVR4) && defined(__sun)
 #include <sys/filio.h>
 #endif
@@ -223,6 +242,106 @@ Tn5250Char tn5250_char_map_to_local(Tn5250CharMap* map, Tn5250Char ebcdic) {
     }
 }
 
+/* XXX: HACK: These characters were reported wrong in transmaps.h.
+        Since that's a generated file, I'm overriding them here -SCK
+
+   Factored out of tn5250_char_map_new() so tn5250_char_map_new_exact()
+   (below) can share it exactly rather than risk a second, divergent copy --
+   this installs the correction into *both* the "870" and "win870" entries
+   of the global tn5250_transmaps[] table regardless of which one was asked
+   for, same as the original always did. */
+static void install_870_workaround(const char* map) {
+    Tn5250CharMap* t;
+
+    if (strcmp(map, "870") != 0 && strcmp(map, "win870") != 0) {
+        return;
+    }
+
+    TN5250_LOG(("install_870_workaround: Installing 870 workaround\n"));
+
+    memcpy(mapfix, windows_1250_to_ibm870, sizeof(mapfix));
+    memcpy(mapfix2, ibm870_to_windows_1250, sizeof(mapfix2));
+    memcpy(mapfix3, iso_8859_2_to_ibm870, sizeof(mapfix3));
+    memcpy(mapfix4, ibm870_to_iso_8859_2, sizeof(mapfix4));
+
+    mapfix[142] = 184;
+    mapfix[143] = 185;
+    mapfix[158] = 182;
+    mapfix[159] = 183;
+    mapfix[163] = 186;
+    mapfix[202] = 114;
+    mapfix[234] = 82;
+
+    mapfix2[82] = 234;
+    mapfix2[114] = 202;
+    mapfix2[182] = 158;
+    mapfix2[183] = 159;
+    mapfix2[184] = 142;
+    mapfix2[185] = 143;
+    mapfix2[186] = 163;
+
+    mapfix3[163] = 186;
+    mapfix3[172] = 185;
+    mapfix3[188] = 183;
+    mapfix3[202] = 114;
+    mapfix3[234] = 82;
+
+    mapfix4[82] = 234;
+    mapfix4[114] = 202;
+    mapfix4[183] = 188;
+    mapfix4[185] = 172;
+    mapfix4[186] = 163;
+
+    for (t = tn5250_transmaps; t->name; t++) {
+        if (!strcmp(t->name, "win870")) {
+            t->to_remote_map = mapfix;
+            t->to_local_map = mapfix2;
+            TN5250_LOG(("Workaround installed for map \"win870\"\n"));
+        }
+        else if (!strcmp(t->name, "870")) {
+            t->to_remote_map = mapfix3;
+            t->to_local_map = mapfix4;
+            TN5250_LOG(("Workaround installed for map \"870\"\n"));
+        }
+    }
+}
+
+/* The plain exact-name lookup both tn5250_char_map_new() and
+   tn5250_char_map_new_exact() fall through to -- factored out so the two
+   stay trivially in sync with each other. */
+static Tn5250CharMap* lookup_exact(const char* map) {
+    Tn5250CharMap* t;
+
+    for (t = tn5250_transmaps; t->name; t++) {
+        if (strcmp(t->name, map) == 0) {
+            return t;
+        }
+    }
+    return NULL;
+}
+
+/* NULL for a NULL map, or an unknown/"win"-prefixed name
+   (tn5250_char_map_new_exact() never resolves one of those, but
+   tn5250_char_map_is_alpha()/tn5250_char_map_to_upper() below fall back to
+   plain ASCII isalpha()/toupper() in that case, same as if no map had been
+   generated for it at all -- fail-safe by construction, not merely by the
+   current absence of a caller that could reach here with one). Takes the
+   map itself, not just its name, so both call sites below do the same
+   NULL check once rather than each repeating it inline. */
+static const Tn5250CharClass* lookup_charclass(Tn5250CharMap* map) {
+    const Tn5250CharClass* c;
+
+    if (map == NULL) {
+        return NULL;
+    }
+    for (c = tn5250_charclasses; c->name; c++) {
+        if (strcmp(c->name, map->name) == 0) {
+            return c;
+        }
+    }
+    return NULL;
+}
+
 /****f* lib5250/tn5250_char_map_new
  * NAME
  *    tn5250_char_map_new
@@ -237,69 +356,16 @@ Tn5250Char tn5250_char_map_to_local(Tn5250CharMap* map, Tn5250Char ebcdic) {
  *    call tn5250_char_map_destroy (a no-op) for future compatibility.
  *****/
 Tn5250CharMap* tn5250_char_map_new(const char* map) {
-    Tn5250CharMap* t;
-
-    /* XXX: HACK: These characters were reported wrong in transmaps.h.
-            Since that's a generated file, I'm overriding them here -SCK */
-
     TN5250_LOG(("tn5250_char_map_new: map = \"%s\"\n", map));
 
-    if (!strcmp(map, "870") || !strcmp(map, "win870")) {
-
-        TN5250_LOG(("tn5250_char_map_new: Installing 870 workaround\n"));
-
-        memcpy(mapfix, windows_1250_to_ibm870, sizeof(mapfix));
-        memcpy(mapfix2, ibm870_to_windows_1250, sizeof(mapfix2));
-        memcpy(mapfix3, iso_8859_2_to_ibm870, sizeof(mapfix3));
-        memcpy(mapfix4, ibm870_to_iso_8859_2, sizeof(mapfix4));
-
-        mapfix[142] = 184;
-        mapfix[143] = 185;
-        mapfix[158] = 182;
-        mapfix[159] = 183;
-        mapfix[163] = 186;
-        mapfix[202] = 114;
-        mapfix[234] = 82;
-
-        mapfix2[82] = 234;
-        mapfix2[114] = 202;
-        mapfix2[182] = 158;
-        mapfix2[183] = 159;
-        mapfix2[184] = 142;
-        mapfix2[185] = 143;
-        mapfix2[186] = 163;
-
-        mapfix3[163] = 186;
-        mapfix3[172] = 185;
-        mapfix3[188] = 183;
-        mapfix3[202] = 114;
-        mapfix3[234] = 82;
-
-        mapfix4[82] = 234;
-        mapfix4[114] = 202;
-        mapfix4[183] = 188;
-        mapfix4[185] = 172;
-        mapfix4[186] = 163;
-
-        for (t = tn5250_transmaps; t->name; t++) {
-            if (!strcmp(t->name, "win870")) {
-                t->to_remote_map = mapfix;
-                t->to_local_map = mapfix2;
-                TN5250_LOG(("Workaround installed for map \"win870\"\n"));
-            }
-            else if (!strcmp(t->name, "870")) {
-                t->to_remote_map = mapfix3;
-                t->to_local_map = mapfix4;
-                TN5250_LOG(("Workaround installed for map \"870\"\n"));
-            }
-        }
-    }
+    install_870_workaround(map);
 
     /* Under Windows, we'll try the "winXXX" maps first, then fall back
        to the standard (unix) versions */
 #ifdef _WIN32
     {
         char winmap[10];
+        Tn5250CharMap* t;
         _snprintf(winmap, sizeof(winmap) - 1, "win%s", map);
         for (t = tn5250_transmaps; t->name; t++) {
             if (strcmp(t->name, winmap) == 0) {
@@ -310,12 +376,42 @@ Tn5250CharMap* tn5250_char_map_new(const char* map) {
     }
 #endif
 
-    for (t = tn5250_transmaps; t->name; t++) {
-        if (strcmp(t->name, map) == 0) {
-            return t;
-        }
-    }
-    return NULL;
+    return lookup_exact(map);
+}
+
+/****f* lib5250/tn5250_char_map_new_exact
+ * NAME
+ *    tn5250_char_map_new_exact
+ * SYNOPSIS
+ *    cmap = tn5250_char_map_new_exact ("870");
+ * INPUTS
+ *    const char *         map        - Name of the character translation map.
+ * DESCRIPTION
+ *    Identical to tn5250_char_map_new(), except it never substitutes a
+ *    "win"-prefixed table on Windows: it always returns the table for the
+ *    exact name given. Added for rm-5250, whose EBCDIC->Unicode display
+ *    table is generated once from the non-"win" tables and shipped
+ *    identically on every platform (see tools/gen_charmaps.py in rm-5250
+ *    itself) -- letting input silently follow a different, "win"-prefixed
+ *    table on Windows would make typed/pasted characters round-trip to a
+ *    different EBCDIC byte than what the very same codepoint displays as,
+ *    for several of the non-Latin-1 code pages (confirmed: this is not a
+ *    narrow issue -- every "win"-prefixed table in transmaps.h disagrees
+ *    with its non-"win" counterpart at some position, drastically so for
+ *    win420/ibm420, over a quarter of the printable byte range).
+ *
+ *    This is a policy choice specific to an embedder with exactly one
+ *    display table shared across platforms, not a correctness fix to
+ *    tn5250_char_map_new() itself -- a different embedder rendering
+ *    through the host OS's own native code page may still legitimately
+ *    want the "win"-preferring behaviour that function keeps unchanged.
+ * NOTES
+ *    Same allocation/destruction contract as tn5250_char_map_new().
+ *****/
+Tn5250CharMap* tn5250_char_map_new_exact(const char* map) {
+    TN5250_LOG(("tn5250_char_map_new_exact: map = \"%s\"\n", map));
+    install_870_workaround(map);
+    return lookup_exact(map);
 }
 
 /****f* lib5250/tn5250_char_map_destroy
@@ -374,6 +470,84 @@ int tn5250_char_map_printable_p(Tn5250CharMap* map, Tn5250Char data) {
 int tn5250_char_map_attribute_p(Tn5250CharMap* map, Tn5250Char data) {
     return ((data & 0xE0) == 0x20);
 }
+
+/****f* lib5250/tn5250_char_map_is_alpha
+ * NAME
+ *    tn5250_char_map_is_alpha
+ * SYNOPSIS
+ *    if (tn5250_char_map_is_alpha (map, ch))
+ *       ;
+ * INPUTS
+ *    Tn5250CharMap *      map        - the character map ch is local to, or
+ *                                       NULL for plain ASCII classification.
+ *    unsigned char        ch         - the local-charset byte to classify.
+ * DESCRIPTION
+ *    Is ch alphabetic in the local charset map was generated for? Unlike
+ *    isalpha(3), correct for every one of this library's 9 distinct
+ *    single-byte local charsets, not just ASCII -- see
+ *    tools/gen_charclass.py. map == NULL, or a map this function does not
+ *    have a table for (a "win"-prefixed name, or one the generator does not
+ *    cover), falls back to plain isalpha(), i.e. today's prior behaviour.
+ *****/
+int tn5250_char_map_is_alpha(Tn5250CharMap* map, unsigned char ch) {
+    const Tn5250CharClass* cls = lookup_charclass(map);
+
+    if (cls == NULL) {
+        return isalpha(ch) != 0;
+    }
+    return cls->is_alpha[ch] != 0;
+}
+/*******/
+
+/****f* lib5250/tn5250_char_map_to_upper
+ * NAME
+ *    tn5250_char_map_to_upper
+ * SYNOPSIS
+ *    ch = tn5250_char_map_to_upper (map, ch);
+ * INPUTS
+ *    Tn5250CharMap *      map        - the character map ch is local to, or
+ *                                       NULL for plain ASCII upcasing.
+ *    unsigned char        ch         - the local-charset byte to upcase.
+ * DESCRIPTION
+ *    The uppercase form of ch in the local charset map was generated for,
+ *    or ch unchanged if it has none (not alphabetic, already uppercase, or
+ *    this specific charset has no single-byte uppercase form for it).
+ *
+ *    Gated on this specific map's own round trip, not merely the per-
+ *    charset table: to_upper[] is shared by every CCSID using the same
+ *    charset, but to_remote_map/to_local_map are per-CCSID, and a handful
+ *    of bytes a charset can represent are not actually reachable on every
+ *    CCSID built from it (e.g. CCSID 870 cannot represent two ISO-8859-2
+ *    letters its own charset otherwise has -- see
+ *    latin2sOrphanedCharactersAreCorrectlyUnrepresentable() on the rm-5250
+ *    side). Upcasing to a byte this map cannot actually round-trip would
+ *    silently substitute a different character than the one asked for, so
+ *    it is left unchanged instead if that happens. map == NULL, or a map
+ *    with no table (same cases as tn5250_char_map_is_alpha()), falls back
+ *    to plain toupper().
+ *****/
+unsigned char tn5250_char_map_to_upper(Tn5250CharMap* map, unsigned char ch) {
+    const Tn5250CharClass* cls = lookup_charclass(map);
+    unsigned char upper;
+
+    if (cls == NULL) {
+        return (unsigned char)toupper(ch);
+    }
+    upper = cls->to_upper[ch];
+    if (upper == ch) {
+        return ch;
+    }
+    /* Deliberately the raw to_remote_map/to_local_map arrays, not
+       tn5250_char_map_to_remote()/to_local() -- this is a round-trip
+       identity check on the *table data*, and those two functions' extra
+       special cases (EBCDIC 0x1C -> DUP, 0x00 -> space) have nothing to do
+       with whether `upper` survives a plain table round trip. */
+    if (map->to_local_map[map->to_remote_map[upper]] == upper) {
+        return upper;
+    }
+    return ch;
+}
+/*******/
 
 #ifndef NDEBUG
 FILE* tn5250_logfile = NULL;

@@ -174,7 +174,11 @@ int tn5250_display_config(Tn5250Display* This, Tn5250Config* config) {
         v = tn5250_config_get(config, "map");
     }
 
-    This->map = tn5250_char_map_new(v);
+    /* _exact(), not tn5250_char_map_new(): see that function's own comment
+       -- this embedder's display table is generated once and shipped
+       identically on every platform, so input must not silently follow a
+       different, "win"-prefixed table on Windows. */
+    This->map = tn5250_char_map_new_exact(v);
     if (This->map == NULL) {
         return -1; /* FIXME: An error message would be nice. */
     }
@@ -920,9 +924,12 @@ void tn5250_display_interactive_addch(Tn5250Display* This, unsigned char ch) {
         tn5250_display_inhibit(This);
         return;
     }
-    /* Upcase the character if this is a monocase field. */
-    if (tn5250_field_is_monocase(field) && isalpha(ch)) {
-        ch = toupper(ch);
+    /* Upcase the character if this is a monocase field. isalpha()/toupper()
+       are ASCII-only; tn5250_char_map_is_alpha()/to_upper() classify
+       against This->map's own local charset instead -- see utility.c. */
+    if (tn5250_field_is_monocase(field) &&
+        tn5250_char_map_is_alpha(This->map, ch)) {
+        ch = tn5250_char_map_to_upper(This->map, ch);
     }
 
     /* '+' and '-' keys activate field exit/field minus for numeric fields. */
@@ -940,7 +947,7 @@ void tn5250_display_interactive_addch(Tn5250Display* This, unsigned char ch) {
     }
 
     /* Make sure this is a valid data character for this field type. */
-    if (!tn5250_field_valid_char(field, ch, &(This->keySRC))) {
+    if (!tn5250_field_valid_char_map(field, This->map, ch, &(This->keySRC))) {
         TN5250_LOG(("Inhibiting: invalid character for field type.\n"));
         This->keystate = TN5250_KEYSTATE_PREHELP;
         tn5250_display_inhibit(This);
@@ -2544,7 +2551,10 @@ void tn5250_display_set_msg_line(Tn5250Display* This,
  *    Save the current message line.
  *****/
 void tn5250_display_set_char_map(Tn5250Display* This, const char* name) {
-    Tn5250CharMap* map = tn5250_char_map_new(name);
+    /* _exact(): same reasoning as tn5250_display_config()'s own call --
+       this assigns the same This->map field, so it must not silently
+       diverge from it on Windows. */
+    Tn5250CharMap* map = tn5250_char_map_new_exact(name);
     TN5250_ASSERT(map != NULL);
     if (This->map != NULL) {
         tn5250_char_map_destroy(This->map);

@@ -73,6 +73,7 @@ extern Tn5250CharMap tn5250_transmaps[];
 /*******/
 
 Tn5250CharMap* tn5250_char_map_new(const char* maping);
+Tn5250CharMap* tn5250_char_map_new_exact(const char* maping);
 void tn5250_char_map_destroy(Tn5250CharMap* This);
 
 void tn5250_closeall(int fd);
@@ -83,6 +84,14 @@ Tn5250Char tn5250_char_map_to_local(Tn5250CharMap* This, Tn5250Char ebcdic);
 
 int tn5250_char_map_printable_p(Tn5250CharMap* This, Tn5250Char data);
 int tn5250_char_map_attribute_p(Tn5250CharMap* This, Tn5250Char data);
+
+/* Is ch (a local-charset byte, not EBCDIC) alphabetic/what is its uppercase
+   form, in the charset This was generated for -- see utility.c's own
+   comment on each. Added for ALPHA_ONLY field validation and monocase
+   upcasing (field.c, display.c), both previously plain isalpha()/toupper(),
+   correct only for ASCII. */
+int tn5250_char_map_is_alpha(Tn5250CharMap* This, unsigned char ch);
+unsigned char tn5250_char_map_to_upper(Tn5250CharMap* This, unsigned char ch);
 
 #define tn5250_new(type, count) (type*)calloc(sizeof(type), (count))
 

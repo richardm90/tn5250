@@ -29,6 +29,7 @@ extern "C" {
 
 struct _Tn5250Field;
 struct _Tn5250DBuffer;
+struct _Tn5250CharMap;
 
 /****s* lib5250/Tn5250Field
  * NAME
@@ -144,6 +145,13 @@ extern int tn5250_field_count_left(Tn5250Field* This, int y, int x);
 extern int tn5250_field_count_right(Tn5250Field* This, int y, int x);
 extern void tn5250_field_set_mdt(Tn5250Field* This);
 extern int tn5250_field_valid_char(Tn5250Field* This, int ch, int* src);
+/* As tn5250_field_valid_char(), but classifies ch (ALPHA_ONLY's isalpha()
+   check) against map's own local charset rather than plain ASCII -- map ==
+   NULL is identical to calling tn5250_field_valid_char() itself, which is
+   now a thin wrapper around this. */
+extern int tn5250_field_valid_char_map(Tn5250Field* This,
+                                       struct _Tn5250CharMap* map, int ch,
+                                       int* src);
 
 #define tn5250_field_mdt(This) (((This)->FFW & TN5250_FIELD_MODIFIED) != 0)
 #define tn5250_field_clear_mdt(This)                                           \
