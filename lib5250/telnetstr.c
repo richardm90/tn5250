@@ -644,6 +644,11 @@ static void telnet_stream_sb(Tn5250Stream* This, unsigned char* sb_buf,
     }
     else if (sb_buf[0] == NEW_ENVIRON) {
         Tn5250ConfigStr* iter;
+
+        if (tn5250_stream_devname_prepare(This, sb_buf, sb_len)) {
+            tn5250_buffer_free(&out_buf);
+            return;
+        }
         tn5250_buffer_append_byte(&out_buf, IAC);
         tn5250_buffer_append_byte(&out_buf, SB);
         tn5250_buffer_append_byte(&out_buf, NEW_ENVIRON);
@@ -967,6 +972,7 @@ int telnet_stream_handle_receive(Tn5250Stream* This) {
                 tn5250_record_dump(This->current_record);
             }
 #endif
+            tn5250_stream_note_record(This, This->current_record);
             This->records =
                 tn5250_record_list_add(This->records, This->current_record);
             This->current_record = NULL;
@@ -987,7 +993,7 @@ int telnet_stream_handle_receive(Tn5250Stream* This) {
      * exactly like "disconnected" (c == -2) and returns, which is what lets
      * Terminal::run() reach its emit closed(...) instead of the process
      * having already exit()ed before ever getting the chance. */
-    return !This->failed && (c != -2);
+    return !This->failed && !This->devname_exhausted && (c != -2);
 }
 
 /****i* lib5250/telnet_stream_escape

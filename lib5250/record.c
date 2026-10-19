@@ -213,3 +213,25 @@ Tn5250Record* tn5250_record_list_destroy(Tn5250Record* list) {
     }
     return NULL;
 }
+
+int tn5250_record_startup_code(const unsigned char* data, int len,
+                               unsigned char code[4]) {
+    int o;
+
+    if (data == NULL || len < 10) {
+        return 0;
+    }
+    if (data[2] != 0x12 || data[3] != 0xA0) {
+        return 0;
+    }
+    /* Raw bytes, not tn5250_record_flow_type(): see record.h. */
+    if (data[4] != 0x90 || data[5] != 0x00) {
+        return 0;
+    }
+    o = 6 + (int)data[6];
+    if (len < o + 9) {
+        return 0;
+    }
+    memcpy(code, data + o + 5, 4);
+    return 1;
+}

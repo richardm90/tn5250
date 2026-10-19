@@ -73,7 +73,23 @@ struct _Tn5250Stream {
 #ifndef NDEBUG
     FILE* debugfile;
 #endif
+
+    /* Device-name candidate walk, opt-in via config "devname.candidates".
+     * Appended last so nothing before it moves. */
+    int devname_index;           /* candidate currently offered */
+    int devname_rejected;        /* 8902 seen, sticky; cleared only when a SEND writes a new name */
+    int devname_exhausted;       /* list ran out; stream stops */
+    int devname_active;          /* a valid list was applied at least once */
+    char devname_accepted[11];   /* candidate current when a success code arrived */
+    char last_startup_code[5];   /* ASCII, e.g. "8902"; "" if none seen */
 };
+
+/* Shared by telnetstr.c and sslstream.c; defined in stream.c. */
+extern void tn5250_stream_note_record(Tn5250Stream* This, Tn5250Record* rec);
+/* 0 = build the IS reply as usual; 1 = send nothing. */
+extern int tn5250_stream_devname_prepare(Tn5250Stream* This,
+                                         const unsigned char* sb_buf,
+                                         int sb_len);
 
 #ifdef __cplusplus
 }

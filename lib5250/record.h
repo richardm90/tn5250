@@ -115,6 +115,15 @@ extern Tn5250Record*
 tn5250_record_list_destroy(Tn5250Record /*@only@*/ /*@null@*/* list);
 extern void tn5250_record_dump(Tn5250Record* This);
 
+/* Startup-response record (RFC 4777 section 10): returns 1 and fills code[4]
+ * with the raw EBCDIC response code if data/len is a well-formed startup
+ * response, else 0 and code is untouched. Never reads outside data[0..len-1].
+ * Deliberately does not use tn5250_record_flow_type(): that macro yields
+ * 0x9000 for the wire bytes 90 00 and so never equals
+ * TN5250_RECORD_FLOW_STARTUP (0x90). */
+extern int tn5250_record_startup_code(const unsigned char* data, int len,
+                                      unsigned char code[4]);
+
 #ifdef __cplusplus
 }
 

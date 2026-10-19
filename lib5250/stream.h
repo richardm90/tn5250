@@ -109,6 +109,49 @@ extern int tn5250_stream_socket_handle(Tn5250Stream* This);
  *****/
 extern int tn5250_stream_has_failed(Tn5250Stream* This);
 
+/****f* lib5250/tn5250_stream_last_startup_code
+ * NAME
+ *    tn5250_stream_last_startup_code
+ * DESCRIPTION
+ *    The most recent startup response code (RFC 4777), ANY code, success or
+ *    failure, as 4 ASCII characters from 0-9A-Z or '?' (bytes outside the
+ *    EBCDIC-invariant digits and capitals). "" if no startup record has been
+ *    seen. Recorded as each record completes, so it is valid after the
+ *    session has consumed the record. NULL-safe.
+ *****/
+extern const char* tn5250_stream_last_startup_code(Tn5250Stream* This);
+
+/****f* lib5250/tn5250_stream_devname_accepted
+ * NAME
+ *    tn5250_stream_devname_accepted
+ * DESCRIPTION
+ *    The candidate that was current when startup code I901, I902 or I906
+ *    arrived (I904 is a failure). "" unless the "devname.candidates" key was
+ *    active and one of those codes was seen. NULL-safe.
+ *****/
+extern const char* tn5250_stream_devname_accepted(Tn5250Stream* This);
+
+/****f* lib5250/tn5250_stream_devname_exhausted
+ * NAME
+ *    tn5250_stream_devname_exhausted
+ * DESCRIPTION
+ *    True once every candidate in "devname.candidates" was refused with
+ *    startup code 8902. The stream then sends no further NEW-ENVIRON reply
+ *    and handle_receive() returns 0, but has_failed() stays false.
+ *
+ *    The opt-in config key "devname.candidates" is a comma-separated list
+ *    (e.g. "TEST0,TEST1"). Each item is 1-10 bytes in 0x20-0x7E; at most 64
+ *    items. Any violation, an empty item, or an empty value makes the key
+ *    count as absent (behaviour then identical to not setting it). The
+ *    caller must supply DISTINCT names; the library does not de-duplicate.
+ *    Before each NEW-ENVIRON SEND the current candidate is written to
+ *    "env.DEVNAME" (appended at the end of the variable list if env.DEVNAME
+ *    was not already set), and on 8902 the next one is used. The key is never
+ *    sent to the host. Meaningful for display sessions only: a print session
+ *    exits on its first non-success startup record. NULL-safe.
+ *****/
+extern int tn5250_stream_devname_exhausted(Tn5250Stream* This);
+
 /****s* lib5250/Tn5250PeerCertInfo
  * NAME
  *    Tn5250PeerCertInfo

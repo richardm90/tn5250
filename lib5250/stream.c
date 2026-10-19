@@ -329,3 +329,161 @@ int tn5250_stream_socket_handle(Tn5250Stream* This) {
 int tn5250_stream_has_failed(Tn5250Stream* This) {
     return This->failed;
 }
+
+const char* tn5250_stream_last_startup_code(Tn5250Stream* This) {
+    return This != NULL ? This->last_startup_code : "";
+}
+
+const char* tn5250_stream_devname_accepted(Tn5250Stream* This) {
+    return This != NULL ? This->devname_accepted : "";
+}
+
+int tn5250_stream_devname_exhausted(Tn5250Stream* This) {
+    return This != NULL ? This->devname_exhausted : 0;
+}
+
+/* RFC 1572 SEND. Private name: SEND is #defined only inside each transport,
+ * and ESC here would be the 5250 escape (0x04), not NEW-ENVIRON ESC. */
+#define TN5250_NEWENV_SEND 1
+
+#define DEVNAME_MAX_ITEMS 64
+#define DEVNAME_MAX_LEN   10
+
+/* EBCDIC digits and capitals are the same in every CCSID we care about. */
+static char devname_ebcdic_to_ascii(unsigned char b) {
+    if (b >= 0xF0 && b <= 0xF9) {
+        return (char)('0' + (b - 0xF0));
+    }
+    if (b >= 0xC1 && b <= 0xC9) {
+        return (char)('A' + (b - 0xC1));
+    }
+    if (b >= 0xD1 && b <= 0xD9) {
+        return (char)('J' + (b - 0xD1));
+    }
+    if (b >= 0xE2 && b <= 0xE9) {
+        return (char)('S' + (b - 0xE2));
+    }
+    return '?';
+}
+
+/* 1 if list is 1..64 comma-separated items of 1..10 bytes in 0x20..0x7E. */
+static int devname_list_is_valid(const char* list) {
+    int items = 1;
+    int len = 0;
+    int i;
+
+    for (i = 0;; i++) {
+        unsigned char c = (unsigned char)list[i];
+        if (c == '\0' || c == ',') {
+            if (len == 0) {
+                return 0;
+            }
+            if (c == '\0') {
+                return 1;
+            }
+            if (++items > DEVNAME_MAX_ITEMS) {
+                return 0;
+            }
+            len = 0;
+            continue;
+        }
+        if (c < 0x20 || c > 0x7E || ++len > DEVNAME_MAX_LEN) {
+            return 0;
+        }
+    }
+}
+
+/* Copies item `index` of a validated list into buf[11]; 0 if past the end. */
+static int devname_candidate_at(const char* list, int index, char* buf) {
+    int i = 0;
+    int item = 0;
+    int n = 0;
+
+    for (;; i++) {
+        char c = list[i];
+        if (c == '\0' || c == ',') {
+            if (item == index) {
+                buf[n] = '\0';
+                return 1;
+            }
+            if (c == '\0') {
+                return 0;
+            }
+            item++;
+            continue;
+        }
+        if (item == index && n < DEVNAME_MAX_LEN) {
+            buf[n++] = c;
+        }
+    }
+}
+
+void tn5250_stream_note_record(Tn5250Stream* This, Tn5250Record* rec) {
+    unsigned char raw[4];
+    int i;
+
+    if (This == NULL || rec == NULL ||
+        !tn5250_record_startup_code(tn5250_record_data(rec),
+                                    tn5250_record_length(rec), raw)) {
+        return;
+    }
+    for (i = 0; i < 4; i++) {
+        This->last_startup_code[i] = devname_ebcdic_to_ascii(raw[i]);
+    }
+    This->last_startup_code[4] = '\0';
+
+    /* Only 8902 advances the walk. The flag is sticky: nothing but a SEND that
+     * writes a new candidate clears it, so intervening records cannot hide a
+     * refusal and a success cannot launder one. */
+    if (raw[0] == 0xF8 && raw[1] == 0xF9 && raw[2] == 0xF0 && raw[3] == 0xF2) {
+        This->devname_rejected = 1;
+    }
+
+    /* I904 is a failure (printsession.c), so not every I code counts. */
+    if (This->devname_active && This->last_startup_code[0] == 'I' &&
+        This->last_startup_code[1] == '9' && This->last_startup_code[2] == '0' &&
+        (This->last_startup_code[3] == '1' ||
+         This->last_startup_code[3] == '2' ||
+         This->last_startup_code[3] == '6') &&
+        This->config != NULL) {
+        const char* cur = tn5250_config_get(This->config, "env.DEVNAME");
+        if (cur != NULL && !This->devname_rejected && !This->devname_exhausted) {
+            strncpy(This->devname_accepted, cur, DEVNAME_MAX_LEN);
+            This->devname_accepted[DEVNAME_MAX_LEN] = '\0';
+        }
+    }
+}
+
+int tn5250_stream_devname_prepare(Tn5250Stream* This,
+                                  const unsigned char* sb_buf, int sb_len) {
+    const char* list;
+    char buf[DEVNAME_MAX_LEN + 1];
+
+    if (This->config == NULL) {
+        return 0;
+    }
+    list = tn5250_config_get(This->config, "devname.candidates");
+    if (list == NULL || !devname_list_is_valid(list)) {
+        return 0;
+    }
+    if (This->devname_exhausted) {
+        return 1;
+    }
+    /* Answer only a real SEND, so a refused name can never go out twice. */
+    if (sb_len < 2 || sb_buf[1] != TN5250_NEWENV_SEND) {
+        return 1;
+    }
+    /* A refusal before any candidate went out has nothing to skip. */
+    if (This->devname_rejected && This->devname_active) {
+        This->devname_index++;
+    }
+    if (!devname_candidate_at(list, This->devname_index, buf)) {
+        This->devname_exhausted = 1;
+        return 1;
+    }
+    /* buf is ours: config_set frees the old value before copying the new. */
+    tn5250_config_set(This->config, "env.DEVNAME", buf);
+    This->devname_rejected = 0;
+    This->devname_active = 1;
+    return 0;
+}
